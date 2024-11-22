@@ -23,4 +23,10 @@ public interface DatabaseDao {
     // Test history
     void saveTestHistory(String username, String historyEntry);
     Collection<String> getUserHistory(String username);
+    
+    // Add these methods to the DatabaseDao interface
+    Collection<Long> getAllUserChatIds();
+    void saveBroadcastMessage(Long adminChatId, String message);
+    
+    Test getTestByMessageId(String messageId);
 } 

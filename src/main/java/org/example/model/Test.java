@@ -9,6 +9,7 @@ public class Test {
     private String answers;
     private int timeLimit;
     private Map<String, Integer> userScores;
+    private String messageId;
 
     public Test(String testId, String pdfPath, String answers, int timeLimit) {
         this.testId = testId.isEmpty() ? "test_" + System.currentTimeMillis() : testId;
@@ -38,5 +39,13 @@ public class Test {
     
     public void addUserScore(String username, int score) {
         userScores.put(username, score);
+    }
+
+    public String getMessageId() {
+        return messageId;
+    }
+
+    public void setMessageId(String messageId) {
+        this.messageId = messageId;
     }
 } 

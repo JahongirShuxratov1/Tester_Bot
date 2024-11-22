@@ -8,10 +8,12 @@ import org.telegram.telegrambots.bots.TelegramLongPollingBot;
 import org.telegram.telegrambots.meta.api.methods.GetFile;
 import org.telegram.telegrambots.meta.api.methods.send.SendDocument;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
+import org.telegram.telegrambots.meta.api.methods.send.SendPhoto;
 import org.telegram.telegrambots.meta.api.methods.updatingmessages.EditMessageText;
 import org.telegram.telegrambots.meta.api.objects.Document;
 import org.telegram.telegrambots.meta.api.objects.File;
 import org.telegram.telegrambots.meta.api.objects.InputFile;
+import org.telegram.telegrambots.meta.api.objects.PhotoSize;
 import org.telegram.telegrambots.meta.api.objects.Update;
 import org.telegram.telegrambots.meta.api.objects.Message;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup;
@@ -81,6 +83,7 @@ public class TestBot extends TelegramLongPollingBot {
         
         // Store user information
         updateUserInfo(update.getMessage().getFrom(), chatId);
+        System.out.println(update.getMessage().getChatId());
 
         if (text.equals("/start")) {
             showMainMenu(chatId);
@@ -338,6 +341,20 @@ public class TestBot extends TelegramLongPollingBot {
                     showAdminManagement(chatId);
                 }
                 break;
+            case "broadcast_message":
+                if (databaseDao.isAdmin(chatId)) {
+                    userStates.put(chatId, "WAITING_FOR_BROADCAST");
+                    sendMessage(chatId, """
+                        Please send your broadcast:
+                        
+                        You can send:
+                        - Text message
+                        - Photo (with optional caption)
+                        - PDF document (with optional caption)
+                        
+                        Your message will be sent to all users.""");
+                }
+                break;
             default:
                 if (callbackData.startsWith("delete_") || 
                     callbackData.startsWith("edit_") || 
@@ -368,6 +385,131 @@ public class TestBot extends TelegramLongPollingBot {
             case "PARTICIPATING_TEST":
                 handleTestSubmission(chatId, text, update);
                 break;
+            case "WAITING_FOR_BROADCAST":
+                if (update.getMessage().hasDocument() || update.getMessage().hasPhoto()) {
+                    handleBroadcastMedia(chatId, update.getMessage());
+                } else {
+                    handleBroadcastMessage(chatId, text);
+                }
+                break;
+        }
+    }
+    private void handleBroadcastMessage(Long chatId, String text) {
+        if (!databaseDao.isAdmin(chatId)) {
+            sendMessage(chatId, "You don't have permission to broadcast messages.");
+            return;
+        }
+
+        Collection<Long> allUserChatIds = databaseDao.getAllUserChatIds();
+        int successCount = 0;
+        List<Long> failedRecipients = new ArrayList<>(); // Track failed recipients
+
+        for (Long userChatId : allUserChatIds) {
+            try {
+                sendMessage(userChatId, "📢 Broadcast from admin:\n\n" + text);
+                successCount++;
+            } catch (Exception e) {
+                failedRecipients.add(userChatId);
+                System.err.println("Failed to send broadcast to " + userChatId + ": " + e.getMessage());
+            }
+        }
+
+        databaseDao.saveBroadcastMessage(chatId, text);
+
+        // More detailed summary including failed recipients if any
+        StringBuilder summary = new StringBuilder(String.format("""
+            📊 Broadcast Summary:
+            ✅ Successfully delivered: %d
+            ❌ Failed deliveries: %d
+            📈 Total recipients: %d
+            """, 
+            successCount, failedRecipients.size(), allUserChatIds.size()));
+
+        if (!failedRecipients.isEmpty()) {
+            summary.append("\nFailed deliveries to these chat IDs:\n");
+            failedRecipients.forEach(id -> summary.append(id).append("\n"));
+        }
+
+        sendMessage(chatId, summary.toString());
+        showAdminPanel(chatId);
+    }
+
+    private void handleBroadcastMedia(Long chatId, Message message) {
+        try {
+            Collection<Long> userChatIds = databaseDao.getAllUserChatIds();
+            int successCount = 0;
+            List<Long> failedRecipients = new ArrayList<>();
+            String caption = message.getCaption() != null ? message.getCaption() : "";
+            String mediaType = "";
+
+            if (message.hasDocument() && message.getDocument().getMimeType().equals("application/pdf")) {
+                mediaType = "PDF Document";
+                String fileId = message.getDocument().getFileId();
+                for (Long userChatId : userChatIds) {
+                    try {
+                        SendDocument sendDocument = new SendDocument();
+                        sendDocument.setChatId(userChatId);
+                        sendDocument.setDocument(new InputFile(fileId));
+                        sendDocument.setCaption("📢 Document from Admin:\n\n" + caption);
+                        execute(sendDocument);
+                        successCount++;
+                    } catch (Exception e) {
+                        failedRecipients.add(userChatId);
+                        System.err.println("Failed to send broadcast document to " + userChatId + ": " + e.getMessage());
+                    }
+                }
+            } else if (message.hasPhoto()) {
+                mediaType = "Photo";
+                List<PhotoSize> photos = message.getPhoto();
+                String fileId = photos.get(photos.size() - 1).getFileId();
+                
+                for (Long userChatId : userChatIds) {
+                    try {
+                        SendPhoto sendPhoto = new SendPhoto();
+                        sendPhoto.setChatId(userChatId);
+                        sendPhoto.setPhoto(new InputFile(fileId));
+                        sendPhoto.setCaption("📢 Photo from Admin:\n\n" + caption);
+                        execute(sendPhoto);
+                        successCount++;
+                    } catch (Exception e) {
+                        failedRecipients.add(userChatId);
+                        System.err.println("Failed to send broadcast photo to " + userChatId + ": " + e.getMessage());
+                    }
+                }
+            }
+
+            databaseDao.saveBroadcastMessage(chatId, 
+                message.hasDocument() ? "📎 Document: " + caption : "🖼 Photo: " + caption);
+
+            // Enhanced feedback with media type and failed recipients
+            StringBuilder feedback = new StringBuilder(String.format("""
+                📊 %s Broadcast Summary:
+                ✅ Successfully delivered: %d
+                ❌ Failed deliveries: %d
+                📈 Total recipients: %d
+                """, 
+                mediaType, successCount, failedRecipients.size(), userChatIds.size()));
+
+            if (!failedRecipients.isEmpty()) {
+                feedback.append("\nFailed deliveries to these chat IDs:\n");
+                failedRecipients.forEach(id -> feedback.append(id).append("\n"));
+                feedback.append("\nThese users may have blocked the bot or deleted their accounts.");
+            }
+
+            sendMessage(chatId, feedback.toString());
+
+        } catch (Exception e) {
+            System.err.println("Error broadcasting media: " + e.getMessage());
+            sendMessage(chatId, String.format("""
+                ❌ Error sending broadcast media:
+                Error type: %s
+                Message: %s
+                
+                Please try again or contact support.""",
+                e.getClass().getSimpleName(), e.getMessage()));
+        } finally {
+            userStates.remove(chatId);
+            showAdminPanel(chatId);
         }
     }
 
@@ -385,6 +527,8 @@ public class TestBot extends TelegramLongPollingBot {
                 createInlineButton("🗑️ Delete Test", "delete_test")));
         keyboard.add(Collections.singletonList(
                 createInlineButton("👥 Manage Admins", "manage_admins")));
+        keyboard.add(Collections.singletonList(
+                createInlineButton("📢 Broadcast Message", "broadcast_message")));
             
         addBackButton(keyboard, "main");
 
@@ -939,7 +1083,6 @@ public class TestBot extends TelegramLongPollingBot {
             return;
         }
 
-        // Check time limit
         String testId = currentTestId.get(chatId);
         Test test = testService.getTest(testId);
         if (test == null) {
@@ -953,43 +1096,147 @@ public class TestBot extends TelegramLongPollingBot {
         if (startTime != null && test.getTimeLimit() > 0) {
             long minutesElapsed = ChronoUnit.MINUTES.between(startTime, LocalDateTime.now());
             if (minutesElapsed > test.getTimeLimit()) {
-                sendMessage(chatId, "❌ Time limit exceeded! Your answers cannot be submitted.");
+                sendMessage(chatId, """
+                    ⏰ Time limit exceeded!
+                    Your answers cannot be submitted.
+                    
+                    Please try the test again if allowed.""");
                 cleanupTestSession(chatId);
                 return;
             }
         }
 
         try {
-            // Format and validate answers
             answers = formatAnswers(answers);
             if (!isValidAnswerFormat(answers)) {
                 sendMessage(chatId, """
                     ❌ Invalid answer format! Please use:
                     - For multiple choice: 1a2b3c
                     - For text answers: 1(answer)2(answer)
-                    Try again.""");
+                    
+                    Example: 1a2b3c4d5a or 1(text)2(3.14)3c
+                    
+                    Try submitting your answers again.""");
                 return;
             }
 
-            // Calculate score
-            int score = calculateScore(answers, test.getAnswers());
-            int totalQuestions = countTotalQuestions(test.getAnswers());
+            // Get correct answers
+            String correctAnswers = test.getAnswers();
+            
+            // Calculate score and track incorrect answers
+            List<String> incorrectQuestions = new ArrayList<>();
+            int score = 0;
+            int currentQuestion = 0;
+            
+            // Parse and compare answers
+            int i = 0;
+            while (i < Math.min(answers.length(), correctAnswers.length())) {
+                if (!Character.isDigit(answers.charAt(i))) {
+                    i++;
+                    continue;
+                }
+                
+                // Get question number
+                StringBuilder questionNum = new StringBuilder();
+                while (i < answers.length() && Character.isDigit(answers.charAt(i))) {
+                    questionNum.append(answers.charAt(i));
+                    i++;
+                }
+                currentQuestion = Integer.parseInt(questionNum.toString());
+                
+                if (i >= answers.length()) break;
+                
+                // Compare answers
+                if (answers.charAt(i) == '(' && i < correctAnswers.length() && correctAnswers.charAt(i) == '(') {
+                    // Text answer
+                    int userEnd = answers.indexOf(')', i);
+                    int correctEnd = correctAnswers.indexOf(')', i);
+                    
+                    if (userEnd != -1 && correctEnd != -1) {
+                        String userAns = answers.substring(i, userEnd + 1);
+                        String correctAns = correctAnswers.substring(i, correctEnd + 1);
+                        
+                        if (userAns.equalsIgnoreCase(correctAns)) {
+                            score++;
+                        } else {
+                            incorrectQuestions.add(String.format("Q%d: Your answer: %s, Correct: %s",
+                                currentQuestion, userAns, correctAns));
+                        }
+                        
+                        i = Math.max(userEnd, correctEnd) + 1;
+                    }
+                } else {
+                    // Multiple choice answer
+                    char userAnswer = Character.toLowerCase(answers.charAt(i));
+                    char correctAnswer = Character.toLowerCase(correctAnswers.charAt(i));
+                    
+                    if (userAnswer == correctAnswer) {
+                        score++;
+                    } else {
+                        incorrectQuestions.add(String.format("Q%d: Your answer: %c, Correct: %c",
+                            currentQuestion, userAnswer, correctAnswer));
+                    }
+                    i++;
+                }
+            }
+
+            int totalQuestions = countTotalQuestions(correctAnswers);
             double percentage = (score * 100.0) / totalQuestions;
+            
+            // Get user information and save score
+            String username = getUsernameFromTelegramUser(update.getMessage().getFrom());
+            test.addUserScore(username, score);
+            testService.updateTest(testId, test);
 
-            // Get user information
-            org.telegram.telegrambots.meta.api.objects.User telegramUser = update.getMessage().getFrom();
-            String username = getUsernameFromTelegramUser(telegramUser);
+            // Build feedback message
+            StringBuilder feedbackMessage = new StringBuilder();
+            feedbackMessage.append(String.format("""
+                📋 Test Results for %s:
+                
+                Score: %d/%d (%.1f%%)
+                """, username, score, totalQuestions, percentage));
 
-            // Save results
-            saveTestResults(chatId, testId, username, score, totalQuestions);
+            // Add incorrect answers section if any
+            if (!incorrectQuestions.isEmpty()) {
+                feedbackMessage.append("\n❌ Incorrect Answers:\n");
+                for (String incorrect : incorrectQuestions) {
+                    feedbackMessage.append(incorrect).append("\n");
+                }
+            } else {
+                feedbackMessage.append("\n✅ Perfect score! All answers correct!\n");
+            }
 
-            // Send feedback
-            sendTestCompletionFeedback(chatId, username, score, totalQuestions, percentage);
+            // Add performance feedback
+            if (percentage >= 90) {
+                feedbackMessage.append("\n🌟 Outstanding performance!");
+            } else if (percentage >= 80) {
+                feedbackMessage.append("\n✨ Great job! Keep it up!");
+            } else if (percentage >= 70) {
+                feedbackMessage.append("\n👍 Good effort! Room for improvement.");
+            } else if (percentage >= 60) {
+                feedbackMessage.append("\n💪 Fair attempt. More practice needed.");
+            } else {
+                feedbackMessage.append("\n📚 Additional study recommended.");
+            }
+
+            // Add rank information
+            int rank = calculateUserRank(username, test);
+            int totalParticipants = test.getUserScores().size();
+            feedbackMessage.append(String.format("""
+                
+                📊 Your Rank: %d/%d
+                
+                Press /start to return to main menu.""",
+                rank, totalParticipants));
+
+            sendMessage(chatId, feedbackMessage.toString());
 
         } catch (Exception e) {
             System.err.println("Error processing test submission: " + e.getMessage());
             e.printStackTrace();
-            sendMessage(chatId, "❌ Error processing your submission. Please try again or contact admin.");
+            sendMessage(chatId, """
+                ❌ Error processing your submission.
+                Please try again or contact admin if the problem persists.""");
         } finally {
             cleanupTestSession(chatId);
         }
@@ -1168,7 +1415,7 @@ public class TestBot extends TelegramLongPollingBot {
         int warningTime = (int)(timeLimit * 0.75);
         scheduler.schedule(() -> {
             if (currentTestId.containsKey(chatId)) {
-                sendMessage(chatId, String.format("⚠️ Warning: %d minutes remaining!", timeLimit - warningTime));
+                sendMessage(chatId, String.format("️ Warning: %d minutes remaining!", timeLimit - warningTime));
             }
         }, warningTime, TimeUnit.MINUTES);
 
