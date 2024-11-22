@@ -66,6 +66,7 @@ public class TestBot extends TelegramLongPollingBot {
 
     @Override
     public void onUpdateReceived(Update update) {
+
         if (update.hasMessage()) {
             if (update.getMessage().hasDocument()) {
                 handleDocument(update);
